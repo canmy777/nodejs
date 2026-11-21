@@ -204,3 +204,49 @@ test('first-run admin setup requires the initialization token and a successful w
     assert.equal(writes[0].ADMIN_PASSWORD, body.password);
     assert.equal(writes[0].ADMIN_SETUP_TOKEN, '');
 });
+
+
+test('Komari UI uploads binary separately, clears credentials and never saves while starting', async () => {
+    const elements = new Map();
+    const element = id => {
+        if (!elements.has(id)) elements.set(id, { value: '', files: [], checked: false, textContent: '', style: {}, dataset: {}, disabled: false });
+        return elements.get(id);
+    };
+    const calls = [];
+    const state = { configured: false, revision: null, running: false, run: null, komari: {
+        configured: true, revision: 'komari-revision', platform: 'linux', arch: 'arm64', endpoint: 'https://example.test',
+        credentialType: 'token', tokenConfigured: true, autoStart: false,
+        binary: { size: 100, arch: 'arm64', sha256: 'a'.repeat(64) }
+    } };
+    const context = vm.createContext({ document: { getElementById: element }, location: { origin: 'https://example.test' },
+        machineTag, regionTitle, escapeHtml, console, setTimeout: () => 0, setInterval: () => 1, clearInterval() {},
+        fetch: async (url, options) => {
+            calls.push({ url, options });
+            if (url.startsWith('/admin/api/probe/')) return { ok: true, json: async () => state };
+            return { ok: false, status: 401, json: async () => ({}) };
+        } });
+    vm.runInContext(declaration('renderAdminDashboardPage'), context);
+    const html = vm.runInContext('renderAdminDashboardPage()', context);
+    assert.match(html, /id="komari_binary"/); assert.match(html, /id="komari_autostart"/);
+    for (const script of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) vm.runInContext(script[1], context);
+    vm.runInContext('showToast = () => {}; confirmAction = async () => true;', context);
+    element('komari_binary').files = [{ name: 'test-agent', size: 100 }];
+    element('komari_sha256').value = 'a'.repeat(64); element('probe_password').value = 'test-password';
+    await vm.runInContext('uploadKomari()', context);
+    const uploadCall = calls.find(x => x.url.endsWith('/komari/upload'));
+    assert.equal(uploadCall.options.body, element('komari_binary').files[0]);
+    assert.equal(uploadCall.options.headers['Content-Type'], 'application/octet-stream');
+    assert.equal(element('probe_password').value, '');
+    element('komari_endpoint').value = 'https://new.test'; element('komari_token').value = 'test-token';
+    element('komari_autostart').checked = true; element('probe_password').value = 'test-password';
+    vm.runInContext('markKomariDirty()', context);
+    await vm.runInContext("komariAction('config')", context);
+    const saved = JSON.parse(calls.find(x => x.url.endsWith('/komari/config')).options.body);
+    assert.equal(saved.token, 'test-token'); assert.equal(saved.autoStart, true);
+    assert.equal(element('komari_token').value, ''); assert.equal(element('probe_password').value, '');
+    element('probe_password').value = 'test-password';
+    await vm.runInContext("komariAction('start')", context);
+    const started = JSON.parse(calls.find(x => x.url.endsWith('/komari/start')).options.body);
+    assert.equal(started.revision, 'komari-revision'); assert.equal(started.token, undefined);
+    assert.match(element('komari_config_status').textContent, /上报状态待核验/);
+});

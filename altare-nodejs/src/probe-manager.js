@@ -146,8 +146,13 @@ function createProbeManager({ directory, killGraceMs = 2000 } = {}) {
             LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' };
         const shell = fs.existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh';
         const args = shell.endsWith('bash') ? ['--noprofile', '--norc', '-s'] : ['-s'];
-        const child = spawn(shell, args, { cwd: directory, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+        return startProcess(shell, args, env, 'umask 077\n' + config.command + '\n', config.timeoutSeconds, 'command');
+    }
+
+    function startProcess(executable, args, env, input, timeoutSeconds, kind) {
+        const child = spawn(executable, args, { cwd: directory, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
         const run = { child, reason: null, public: {
+            kind,
             id: crypto.randomBytes(12).toString('hex'), state: 'running',
             startedAt: new Date().toISOString(), finishedAt: null,
             exitCode: null, signal: null, outputBytes: 0
@@ -174,17 +179,25 @@ function createProbeManager({ directory, killGraceMs = 2000 } = {}) {
             if (child.pid && !groupAlive(child.pid)) finish(run, run.reason || (run.public.exitCode === 0 ? 'completed' : 'failed'));
         }, 200);
         run.monitor.unref();
-        if (config.timeoutSeconds > 0) {
-            run.timeout = setTimeout(() => stopRun('timed_out'), config.timeoutSeconds * 1000);
+        if (timeoutSeconds > 0) {
+            run.timeout = setTimeout(() => stopRun('timed_out'), timeoutSeconds * 1000);
             run.timeout.unref();
         }
         // Credentials stay out of OS process arguments and the application's log.
-        child.stdin.end('umask 077\n' + config.command + '\n');
+        child.stdin.end(input);
         return status();
     }
 
     return {
         status, save, run,
+        runExecutable(executable, args) {
+            if (closed) throw new ProbeError('SHUTTING_DOWN', 503);
+            if (active) throw new ProbeError('ALREADY_RUNNING', 409);
+            if (process.platform === 'win32') throw new ProbeError('UNSUPPORTED_PLATFORM');
+            prepareDirectory();
+            return startProcess(executable, args, { PATH: '/usr/local/bin:/usr/bin:/bin',
+                HOME: directory, TMPDIR: directory, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' }, '', 0, 'komari');
+        },
         stop() { stopRun('stopped'); return status(); },
         shutdown() { closed = true; stopRun('stopped'); },
         // The exit hook is synchronous and never targets a saved/reused PID.
