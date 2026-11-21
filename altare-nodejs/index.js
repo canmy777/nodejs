@@ -21,6 +21,8 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 const { spawn } = require('child_process');
+const { applyLegacyRuntimeBundle } = require('./src/runtime-env');
+applyLegacyRuntimeBundle(process.env);
 const { createProbeManager } = require('./src/probe-manager');
 const { createKomariManager } = require('./src/komari-manager');
 const { handleProbeRequest } = require('./src/probe-routes');

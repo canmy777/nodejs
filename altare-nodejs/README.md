@@ -15,6 +15,7 @@ altare-nodejs/
 ├── package.json      # 启动与测试脚本（必须）
 ├── .env.example      # 配置模板（部署时复制为 .env）
 ├── src/
+│   ├── runtime-env.js # 兼容历史模板私有运行变量（必须）
 │   ├── argo-supervisor.js # 隧道进程监管与就绪探测（必须）
 │   ├── komari-manager.js # Komari ELF 上传、私有配置与可选自动启动（必须）
 │   ├── probe-manager.js # 私有命令存储、受管执行与进程组清理（必须）
@@ -60,6 +61,8 @@ npm start         # 启动
 3. 上传这些文件到容器根目录：`index.js`、`package.json`、`start.sh`、整个 `src/` 目录。首次部署把 `.env.example` 复制为 `.env` 并填写配置。不要上传整个父目录，也不要上传 `test/`。
 4. 端口：面板注入 `SERVER_PORT` 时，`.env` 里的 `SERVER_PORT`、`PORT` 留空即可；程序会自动探测面板端口（进程环境变量 → `/proc` → 命令行 → 模糊匹配）。手动部署才需要显式填写。不再有固定默认端口，探测不到端口时服务挂起等待。
 5. 上传 `start.sh` 并设置执行权限；启动命令填写：`cd /home/container && umask 077 && exec /bin/sh /home/container/start.sh >> /home/container/boot.log 2>&1`。脚本读取 cgroup v1/v2 容器内存上限，以 70% 设置 V8 old-space，不在面板命令中固定堆值；无法读取有效限制时交由 Node.js 使用默认堆策略。
+历史部署若将 JSON 私有凭据包放在模板 `ACCESS_TOKEN`，`runtime-env.js` 会识别其 adminPassword/argoToken 并仅在进程内恢复运行变量；已有显式环境变量优先，普通 Git Token 不转换，识别出的非法凭据包会停止启动且不回显值。升级时保留原模板变量和 `.env`，无需把真实凭据写入启动命令或源码。
+
 6. 点击启动，查看控制台是否出现核心启动标记，然后打开首页与 `/admin`。观察约两分钟确认稳定，不要只看面板 Running。
 7. 公网建议通过自己的 HTTPS 反代或 Cloudflare Tunnel 访问。
 
@@ -115,7 +118,7 @@ npm start         # 启动
 
 ### 探针管理
 
-当前候选版本 `2.0.0-test.2` 提供后台「探针管理」，本地验证后仍需单台容器验收再推广。推荐使用 Komari 专用流程：
+当前候选版本 `2.0.0-test.3` 提供后台「探针管理」，本地验证后仍需单台容器验收再推广。推荐使用 Komari 专用流程：
 
 1. 从可信发布方取得 Linux `komari-agent` 程序及对应 SHA-256，选择文件并填入校验值，输入当前管理密码后上传。单文件上限 32 MiB、上传限时 90 秒；服务端流式写入、验证 ELF 及容器架构（amd64/arm64/386/arm）并核对 SHA-256，失败不会替换现有程序。SHA-256 只能证明与所填校验值一致，不能单独证明来源可信。
 2. 填写 HTTPS 监控面板地址，选择节点 Token 或自动发现密钥并输入凭据，再保存。Token 不回显，留空保留已有值；切换凭据类型或面板时须重新填凭据。输入的凭据不进入日志、进程参数或状态 API。
