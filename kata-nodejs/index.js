@@ -21,6 +21,9 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 const { spawn } = require('child_process');
+const { createProbeManager } = require('./src/probe-manager');
+const { createKomariManager } = require('./src/komari-manager');
+const { handleProbeRequest } = require('./src/probe-routes');
 const { createArgoSupervisor, effectiveToken } = require('./src/argo-supervisor');
 const { hashPassword, verifyPassword, safeUser, createRateLimiter, MAX_BODY_BYTES } = require('./src/security');
 // 现代订阅转换引擎（六格式）：从 liuyang 移植，零依赖，支持 ECH 规范处理
@@ -35,6 +38,8 @@ const DATA_DIR = path.join(BASE_DIR, 'data');
 const ENV_FILE = path.join(BASE_DIR, '.env');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const probeManager = createProbeManager({ directory: path.join(DATA_DIR, 'probe-private') });
+const komariManager = createKomariManager({ directory: path.join(DATA_DIR, 'probe-private'), runner: probeManager });
 
 if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -2276,6 +2281,13 @@ async function convertSubWithZeroTrust(user, target, rawNodes, settings, localEn
         res.writeHead(302, { Location: '/admin' });
         return res.end();
     }
+
+    // Probe commands require an active admin session, exact Origin and fresh password.
+    if (handleProbeRequest({ pathname, method, req, manager: probeManager, komari: komariManager,
+        authenticated: () => checkAdminAuth(req),
+        sameOrigin: () => isSameOriginRequest(req), readBody, sendJson,
+        adminPassword: () => ADMIN_PASSWORD, limiter: adminLoginLimiter,
+        clientIp: () => getClientIp(req) || 'unknown' })) return;
 
     // 管理员 API 保护门禁
     if (pathname.startsWith('/admin/api/')) {
@@ -4646,6 +4658,9 @@ function renderAdminDashboardPage() {
             <li class="menu-item" id="menu_sys" onclick="switchNav('sys')">
                 <span>⚡</span> <span>隧道与系统变量</span>
             </li>
+            <li class="menu-item" id="menu_probe" onclick="switchNav('probe')">
+                <span>🔧</span> <span>探针管理</span>
+            </li>
             <li class="menu-item" id="menu_status" onclick="switchNav('status')">
                 <span>📊</span> <span>容器探针监控</span>
             </li>
@@ -4976,6 +4991,64 @@ function renderAdminDashboardPage() {
                 <button class="btn btn-primary" style="padding:8px 20px;" onclick="saveSystemSettings()">💾 保存系统参数与新密码</button>
             </div>
 
+            <div class="card-panel" id="panel_probe" style="display:none;">
+                <div class="panel-header">
+                    <div>
+                        <div class="panel-title">🔧 探针管理</div>
+                        <div class="panel-subtitle">上传并配置 Komari，或保存高级命令后手动执行。</div>
+                    </div>
+                    <button type="button" class="btn" onclick="fetchProbeStatus()">刷新状态</button>
+                </div>
+                <section aria-label="Komari 探针配置" style="padding:16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:20px;">
+                    <h3 style="margin-top:0;">Komari 程序与配置</h3>
+                    <p id="komari_binary_status" role="status">读取探针文件状态…</p>
+                    <div class="form-row"><label for="komari_binary">Linux 探针程序（ELF，最多 32 MiB）</label>
+                        <input type="file" id="komari_binary" style="font-size:16px;max-width:100%;" /></div>
+                    <div class="form-row"><label for="komari_sha256">发布方 SHA-256（64 位）</label>
+                        <input type="text" id="komari_sha256" maxlength="64" spellcheck="false" autocomplete="off" style="font-size:16px;" placeholder="粘贴官方对应版本与架构的 SHA-256" /></div>
+                    <button type="button" class="btn" id="komari_upload" onclick="uploadKomari()">上传并校验程序</button>
+                    <div class="form-row" style="margin-top:16px;"><label for="komari_endpoint">Komari 面板 HTTPS 地址</label>
+                        <input type="url" id="komari_endpoint" oninput="markKomariDirty()" style="font-size:16px;" placeholder="https://你的监控面板" /></div>
+                    <div class="form-row"><label for="komari_credential_type">凭据类型</label>
+                        <select id="komari_credential_type" onchange="markKomariDirty()" style="font-size:16px;"><option value="token">节点专属 Token</option><option value="auto_discovery">自动发现密钥</option></select></div>
+                    <div class="form-row"><label for="komari_token">Token / 自动发现密钥（已配置时留空保留）</label>
+                        <input type="password" id="komari_token" autocomplete="new-password" style="font-size:16px;" /></div>
+                    <label style="display:flex;align-items:center;gap:8px;min-height:44px;"><input type="checkbox" id="komari_autostart" onchange="markKomariDirty()" /> 随应用启动 Komari（默认关闭）</label>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;">
+                        <button type="button" class="btn btn-primary" id="komari_save" onclick="komariAction('config')">保存 Komari 配置</button>
+                        <button type="button" class="btn btn-success" id="komari_start" onclick="komariAction('start')" disabled>启动 Komari</button>
+                    </div>
+                    <p id="komari_config_status" role="status">尚未读取配置。</p>
+                    <p style="color:#64748b;line-height:1.7;">每个操作均使用下方的当前管理密码。Token 不回显；专用模式关闭探针自动更新和远程终端功能，上传和保存不会执行。与高级命令共用同一个运行槽，点击下方“停止”可终止。本地进程运行不代表监控面板已收到上报。</p>
+                </section>
+                <h3>高级命令（可选）</h3>
+                <p style="color:#b45309;line-height:1.7;">命令具有当前 Node 进程的文件和网络权限，请只执行自己信任的脚本。模板容器没有 systemd/root；依赖 sudo 或系统服务安装的命令可能失败。不要使用后台脱离命令。</p>
+                <div class="form-row">
+                    <label for="probe_file">导入命令文件（.sh / .txt，最多 16 KiB）</label>
+                    <input id="probe_file" type="file" accept=".sh,.txt,text/plain,text/x-shellscript" onchange="importProbeCommand(event)" />
+                </div>
+                <div class="form-row">
+                    <label for="probe_command">探针命令</label>
+                    <textarea id="probe_command" rows="7" autocomplete="off" spellcheck="false" placeholder="粘贴探针命令，或从上方导入文件。已保存的命令不会回显。" style="width:100%;box-sizing:border-box;font:16px/1.6 ui-monospace,monospace;"></textarea>
+                </div>
+                <div class="form-row">
+                    <label for="probe_timeout">最长执行时间（秒，10–1800；0 为前台常驻探针）</label>
+                    <input id="probe_timeout" type="number" min="0" max="1800" value="300" />
+                </div>
+                <div class="form-row">
+                    <label for="probe_password">当前管理密码（每次操作重新验证）</label>
+                    <input id="probe_password" type="password" autocomplete="current-password" style="font-size:16px;" />
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin:16px 0;">
+                    <button type="button" class="btn btn-primary" id="probe_save" onclick="probeAction('config')">保存命令</button>
+                    <button type="button" class="btn btn-success" id="probe_run" onclick="probeAction('run')" disabled>执行</button>
+                    <button type="button" class="btn btn-danger" id="probe_stop" onclick="probeAction('stop')" disabled>停止</button>
+                </div>
+                <p id="probe_config_status" role="status">正在读取状态…</p>
+                <pre class="terminal-box" id="probe_status" style="white-space:pre-wrap;overflow-wrap:anywhere;" aria-live="polite">尚无执行记录。</pre>
+                <p style="color:#64748b;line-height:1.7;">为防止 Token 和密码泄露，不回显已保存命令，也不保留原始标准输出或错误输出；仅显示执行状态、输出字节数和退出码。高级命令保存或服务重启不会自动重放；Komari 仅按显式开启的自动启动选项恢复。停止/超时会清理当前进程组，但无法撤销脚本已完成的安装或外部修改，也无法管理自行 setsid/daemonize 脱离的进程。</p>
+            </div>
+
             <!-- PANEL 4: 容器探针监控 -->
             <div class="card-panel" id="panel_status" style="display:none;">
                 <div class="panel-header">
@@ -5139,15 +5212,182 @@ function renderAdminDashboardPage() {
         let cachedUsersList = [];
         let cachedUsersMap = new Map();
 
+        let komariRevision = null;
+        let komariFormDirty = false;
+        function markKomariDirty() { komariFormDirty = true; }
+        function renderKomariStatus(data) {
+            komariRevision = data.revision;
+            const binary = data.binary;
+            document.getElementById('komari_binary_status').textContent = '容器：' + data.platform + ' / ' + data.arch +
+                (binary ? ' · 已上传 ' + binary.arch + ' · ' + binary.size + ' 字节 · SHA-256 ' + binary.sha256 : ' · 尚未上传程序');
+            if (!komariFormDirty) {
+                document.getElementById('komari_endpoint').value = data.endpoint || '';
+                document.getElementById('komari_credential_type').value = data.credentialType || 'token';
+                document.getElementById('komari_autostart').checked = data.autoStart === true;
+            }
+            document.getElementById('komari_token').placeholder = data.tokenConfigured ? '已配置；留空保留，不回显' : '请输入 Token 或自动发现密钥';
+            document.getElementById('komari_config_status').textContent = (data.configured ? '连接配置已保存' : '连接配置未完成') +
+                ' · 自动启动' + (data.autoStart ? '已开启' : '已关闭') +
+                (data.autostartError ? ' · 自动启动失败：' + data.autostartError : '') + ' · 面板上报状态待核验';
+            document.getElementById('komari_start').disabled = probeBusy || probeActive || data.uploading || !data.configured || !binary;
+            ['komari_save', 'komari_upload'].forEach(id => { document.getElementById(id).disabled = probeBusy || probeActive || data.uploading; });
+        }
+
+        async function uploadKomari() {
+            if (probeBusy) return;
+            const file = document.getElementById('komari_binary').files[0];
+            const digest = document.getElementById('komari_sha256').value.trim();
+            const passwordField = document.getElementById('probe_password');
+            const password = passwordField.value;
+            if (!file || file.size > 33554432 || file.size < 64) { showToast('请选择不超过 32 MiB 的 Linux 探针程序', 'error'); return; }
+            if (!/^[a-f0-9]{64}$/i.test(digest) || !password) { showToast('请输入发布方 SHA-256 和当前管理密码', 'error'); return; }
+            probeBusy = true;
+            document.getElementById('komari_upload').disabled = true;
+            try {
+                const response = await fetch('/admin/api/probe/komari/upload', { method: 'POST',
+                    headers: { 'Content-Type': 'application/octet-stream', 'X-Probe-Password': encodeURIComponent(password), 'X-Probe-Sha256': digest }, body: file });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || '上传失败');
+                document.getElementById('komari_binary').value = '';
+                renderProbeStatus(data); showToast('程序已校验保存，尚未启动', 'success');
+            } catch (error) { showToast(error.message || '上传失败，请刷新确认结果', 'error'); }
+            finally { probeBusy = false; passwordField.value = ''; await fetchProbeStatus(); }
+        }
+
+        async function komariAction(action) {
+            if (probeBusy || !['config', 'start'].includes(action)) return;
+            const passwordField = document.getElementById('probe_password');
+            const password = passwordField.value;
+            if (!password) { showToast('请输入当前管理密码', 'error'); return; }
+            if (action === 'start' && (komariFormDirty || document.getElementById('komari_token').value)) {
+                showToast('请先保存 Komari 配置后再启动', 'error'); return;
+            }
+            const revision = komariRevision;
+            probeBusy = true;
+            if (action === 'start' && !await confirmAction('启动已上传并校验的 Komari 程序？它将读取私有连接配置并持续运行。')) {
+                probeBusy = false; return;
+            }
+            try {
+                const payload = { password: password };
+                if (action === 'config') {
+                    payload.endpoint = document.getElementById('komari_endpoint').value.trim();
+                    payload.token = document.getElementById('komari_token').value.trim();
+                    payload.credentialType = document.getElementById('komari_credential_type').value;
+                    payload.autoStart = document.getElementById('komari_autostart').checked;
+                } else payload.revision = revision;
+                const response = await fetch('/admin/api/probe/komari/' + action, { method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || '操作失败');
+                if (action === 'config') { document.getElementById('komari_token').value = ''; komariFormDirty = false; }
+                renderProbeStatus(data); showToast(action === 'config' ? '配置已保存' : '已请求启动；请在监控面板核验上报', 'success');
+            } catch (error) { showToast(error.message || '请求失败，请刷新状态', 'error'); }
+            finally { probeBusy = false; passwordField.value = ''; await fetchProbeStatus(); }
+        }
+
+        let probeRevision = null;
+        let probeBusy = false;
+        let probePoll = null;
+        let probeActive = false;
+        let probeVisible = false;
+        const probeStates = { running: '执行中', stopping: '正在停止', completed: '执行结束',
+            failed: '执行失败', stopped: '已停止', timed_out: '执行超时', output_limit: '输出超限' };
+
+        function renderProbeStatus(data) {
+            probeRevision = data.revision;
+            probeActive = Boolean(data.running);
+            if (data.komari) renderKomariStatus(data.komari);
+            document.getElementById('probe_config_status').textContent = data.configured
+                ? '已保存命令（不回显） · ' + (data.timeoutSeconds === 0 ? '前台常驻，手动停止' : '最长执行 ' + data.timeoutSeconds + ' 秒') + ' · 保存时间 ' + data.savedAt
+                : '尚未保存命令。';
+            const run = data.run;
+            document.getElementById('probe_status').textContent = run
+                ? ['类型：' + (run.kind === 'komari' ? 'Komari（本地进程）' : '高级命令'), '状态：' + (probeStates[run.state] || '未知'), '开始：' + run.startedAt,
+                    '结束：' + (run.finishedAt || '--'), '退出码：' + (run.exitCode === null ? '--' : run.exitCode),
+                    '输出字节数：' + run.outputBytes, '原始输出已抑制，避免凭据泄露。'].join(String.fromCharCode(10))
+                : '尚无执行记录。';
+            document.getElementById('probe_save').disabled = probeBusy || probeActive;
+            document.getElementById('probe_run').disabled = probeBusy || probeActive || !data.configured;
+            document.getElementById('probe_stop').disabled = probeBusy || !probeActive;
+            if (data.running && probeVisible && !probePoll) probePoll = setInterval(fetchProbeStatus, 3000);
+            if (!data.running && probePoll) { clearInterval(probePoll); probePoll = null; }
+        }
+
+        async function fetchProbeStatus() {
+            try {
+                const response = await fetch('/admin/api/probe/status');
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || '无法读取探针状态');
+                renderProbeStatus(data);
+            } catch (_) {
+                document.getElementById('probe_config_status').textContent = '状态读取失败，请刷新重试。';
+                if (probePoll) { clearInterval(probePoll); probePoll = null; }
+            }
+        }
+
+        async function importProbeCommand(event) {
+            const file = event.target.files && event.target.files[0];
+            if (!file) return;
+            try {
+                if (file.size > 16384 || !/\\.(sh|txt)$/i.test(file.name)) throw new Error('仅支持不超过 16 KiB 的 .sh/.txt 文件');
+                const command = await file.text();
+                if (command.includes(String.fromCharCode(0))) throw new Error('文件必须是文本命令');
+                document.getElementById('probe_command').value = command;
+                showToast('命令已导入编辑区，尚未保存或执行');
+            } catch (error) { showToast(error.message || '文件读取失败', 'error'); }
+            finally { event.target.value = ''; }
+        }
+
+        async function probeAction(action) {
+            if (probeBusy) return;
+            if (!['config', 'run', 'stop'].includes(action)) return;
+            const revisionAtConfirmation = probeRevision;
+            const passwordField = document.getElementById('probe_password');
+            const password = passwordField.value;
+            if (!password) { showToast('请输入当前管理密码', 'error'); return; }
+            if (action === 'run' && document.getElementById('probe_command').value.trim()) {
+                showToast('编辑区有未保存命令，请先保存后执行', 'error'); return;
+            }
+            if (action === 'run') {
+                probeBusy = true;
+                const accepted = await confirmAction('以当前容器权限执行已保存的命令？文件和网络修改可能无法撤销。最长执行时间内将保留当前进程组，重复执行会被拒绝。');
+                probeBusy = false;
+                if (!accepted) return;
+            }
+            probeBusy = true;
+            ['save', 'run', 'stop'].forEach(key => { document.getElementById('probe_' + key).disabled = true; });
+            try {
+                const payload = { password: password };
+                if (action === 'config') {
+                    payload.command = document.getElementById('probe_command').value;
+                    payload.timeoutSeconds = Number(document.getElementById('probe_timeout').value);
+                } else if (action === 'run') payload.revision = revisionAtConfirmation;
+                const response = await fetch('/admin/api/probe/' + action, { method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || '探针操作失败');
+                if (action === 'config') document.getElementById('probe_command').value = '';
+                renderProbeStatus(data);
+                showToast(action === 'config' ? '命令已保存，尚未执行' : action === 'run' ? '执行请求已接受' : '已请求停止', 'success');
+            } catch (error) { showToast(error.message || '请求失败，请刷新状态确认结果后再操作', 'error'); }
+            finally {
+                passwordField.value = '';
+                probeBusy = false;
+                await fetchProbeStatus();
+            }
+        }
+
         const navTitles = {
             users: '用户风控中心',
             cdn: '三网优选调度',
             sys: '隧道与系统变量',
+            probe: '探针管理',
             status: '容器探针监控'
         };
 
         function switchNav(key) {
-            ['users', 'cdn', 'sys', 'status'].forEach(k => {
+            probeVisible = key === 'probe';
+            ['users', 'cdn', 'sys', 'probe', 'status'].forEach(k => {
                 const menuItem = document.getElementById('menu_' + k);
                 const panel = document.getElementById('panel_' + k);
                 if (k === key) {
@@ -5161,6 +5401,8 @@ function renderAdminDashboardPage() {
             document.getElementById('curNavTitle').innerText = navTitles[key] || '管理控制台';
             if (key === 'users') fetchUsers();
             if (key === 'status') fetchStatus();
+            if (key === 'probe') fetchProbeStatus();
+            else if (probePoll) { clearInterval(probePoll); probePoll = null; }
         }
 
         async function fetchStatus() {
@@ -5820,6 +6062,7 @@ server.listen(PORT, '0.0.0.0', () => {
     if (siteSettings.argoToken) {
         startArgoTunnel(siteSettings.argoToken);
     }
+    komariManager.autoStart();
     console.log(`🛡️ 内存使用: ${formatBytes(process.memoryUsage().rss)} (规格 308MB)`);
     console.log(`========================================================\n`);
 });
@@ -5832,11 +6075,13 @@ function gracefulShutdown(signal) {
     console.log(`[System] 收到 ${signal}，正在关闭服务并保存用户数据...`);
     saveUsers();
     argoSupervisor.shutdown();
+    probeManager.shutdown();
     server.close();
     setTimeout(() => process.exit(0), 4500).unref();
 }
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('exit', () => probeManager.forceCleanup());
 
 // 优雅捕获异常防止崩溃
 process.on('uncaughtException', err => {

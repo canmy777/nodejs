@@ -13,6 +13,9 @@ kata-nodejs/
 ├── .env.example      # 配置模板（部署时复制为 .env）
 ├── src/
 │   ├── argo-supervisor.js # 隧道进程监管与就绪探测（必须）
+│   ├── probe-manager.js # 探针命令管理与进程生命周期（必须）
+│   ├── probe-routes.js  # 管理鉴权、上传及执行接口（必须）
+│   ├── komari-manager.js # Komari 上传校验与私有配置（必须）
 │   ├── security.js      # 密码哈希、会话、限速（必须）
 │   ├── protocol.js      # WebSocket/VLESS 协议解析（必须）
 │   ├── sub_converter.js # 现代订阅转换引擎：6 格式 + ECH 规范（必须）
@@ -21,7 +24,7 @@ kata-nodejs/
 └── data/             # 运行时生成，保存用户与设置
 ```
 
-注意：`src/` 五个模块必须一起上传，只传 `index.js` 会报 `Cannot find module './src/security'` 或 `Cannot find module './src/sub_converter'`。
+注意：`src/` 全部模块必须一起上传，只传 `index.js` 会因为缺少依赖而启动失败。
 
 ## 2. 环境要求
 
@@ -36,7 +39,7 @@ git clone https://github.com/hc990275/nodejs.git
 cd nodejs/kata-nodejs
 cp .env.example .env
 # 编辑 .env，按需配置（见第 6 节）
-npm test          # 可选：运行 11 项回归测试
+npm test          # 运行当前完整回归测试
 npm start         # 启动
 ```
 
@@ -106,6 +109,29 @@ npm start         # 启动
 - **封禁/解封/续期/删除**：在用户编辑框内操作。封禁和删除会断开该用户连接。
 - **重启核心**：顶部工具栏按钮，会重启 Node 服务，影响所有在线连接，请在维护时段使用。
 
+### 探针管理
+
+当前候选版本 `2.0.0-test.1` 提供后台「探针管理」，本地验证后仍需单台容器验收再推广。推荐使用 Komari 专用流程：
+
+1. 从可信发布方取得 Linux `komari-agent` 程序及对应 SHA-256，选择文件并填入校验值，输入当前管理密码后上传。单文件上限 32 MiB、上传限时 90 秒；服务端流式写入、验证 ELF 及容器架构（amd64/arm64/386/arm）并核对 SHA-256，失败不会替换现有程序。SHA-256 只能证明与所填校验值一致，不能单独证明来源可信。
+2. 填写 HTTPS 监控面板地址，选择节点 Token 或自动发现密钥并输入凭据，再保存。Token 不回显，留空保留已有值；切换凭据类型或面板时须重新填凭据。输入的凭据不进入日志、进程参数或状态 API。
+3. 点击「启动 Komari」并确认。专用模式使用私有 JSON 配置运行、关闭远程终端和自动更新，与高级命令共用一个运行槽，不允许并发；通过「停止」结束。显示“运行中”只表示本地进程，面板是否收到上报须另外核验。
+4. 「随应用启动」默认关闭。勾选保存后，下一次 Node 服务成功监听时自动尝试启动一次；上传、保存本身不启动，失败不会无限重试，手动停止后本次运行期不会自动重拉。容器或 Node 退出时一起清理。
+
+探针和连接配置位于 `data/probe-private/`；元数据及配置文件 0600，目录与程序 0700。自动发现缓存按面板和凭据隔离在 `profile-*/` 内，程序替换保留原缓存；更换连接身份生成新 profile，不自动删除旧私有资料。该目录不进入 Git、普通归档或聊天。
+
+高级模式仍支持粘贴命令或从 `.sh/.txt` 导入（16 KiB 内），保存后单独点击「执行」，也可查看状态或停止。上传、保存、启动、执行及停止均要求有效管理会话、合法 HTTPS Origin 与重新输入当前管理密码；执行前有确认框，同一时刻只运行一个任务，配置版本变化会拒绝执行旧版本。
+
+- 命令保存到 `data/probe-private/command.json`，目录 0700、文件 0600，并原子替换。该文件可能含凭据，属于私有运行配置，禁止加入 Git、普通备份或发给其他人；页面与状态 API 不回显命令。
+- 执行工作目录为 `data/probe-private/`，通过 Bash（没有时用 sh）的 stdin 传入命令，不把命令放到系统进程参数。不会继承应用的 Token、密码或 `NODE_OPTIONS` 环境变量；这不是沙箱，同一容器用户仍能读取其有权限的文件并访问网络。
+- 默认最多执行 300 秒，可设 10–1800 秒；设为 0 可运行前台常驻探针，直到手动停止或应用关闭。输出超过 1 MiB 会终止。原始 stdout/stderr 直接丢弃，不写应用日志或返回浏览器；仅保留本次状态、时间、输出字节数和退出码，状态记录只在内存中。
+- 点击停止、超时、输出超限、应用正常关闭都会先终止当前进程组，必要时强制终止。高级命令保存及应用重启均不会自动执行；Komari 专用模式只按显式开启的自动启动选项执行。只管理自己启动的当前进程组，不按历史 PID 杀进程。
+- 适用于容器权限下的前台安装/检查任务。需要 sudo/root、systemd/OpenRC 的宿主机安装命令不能直接套用。常驻探针应设为 0 并在前台运行；设置正数时达到时限会停止。自行 daemonize/setsid 脱离的子进程不受管理器控制，不应使用此类命令。安装退出码 0 仅表示命令结束，不代表探针已向监控面板注册上线。
+
+接口：`GET /admin/api/probe/status`；`POST /admin/api/probe/komari/config`（endpoint/token/credentialType/autoStart/password）；`POST /admin/api/probe/komari/start`（revision/password）；`POST /admin/api/probe/komari/upload`（原始 application/octet-stream；X-Probe-Sha256、X-Probe-Password 请求头，密码使用 encodeURIComponent 编码）；`POST /admin/api/probe/config`（高级 command/timeoutSeconds/password）；`POST /admin/api/probe/run`（revision/password）；`POST /admin/api/probe/stop`（共用停止入口，password）。不提供通过 GET 触发执行的入口。
+
+Komari 配置字段及自动发现缓存行为按官方 `komari-agent` 1.6.20 的 `cmd/flags/flag.go` 和 `cmd/autodiscovery.go` 核对。其他版本仍须先验证兼容；当前测试使用模拟 ELF 程序，不表示已向真实监控面板注册。
+
 ## 8. 订阅地址
 
 格式：`/sub?token=用户UUID`
@@ -139,7 +165,7 @@ node --check index.js
 npm test
 ```
 
-- 模块找不到：补传 `src/` 下五个模块（`security.js`、`protocol.js`、`sub_converter.js`、`yaml-lite.js`、`argo-supervisor.js`），检查大小写与目录层级。
+- 模块找不到：补传 `src/` 全部模块（包括探针管理三个模块），检查大小写与目录层级。
 - 页面打不开：确认业务端口、容器监听、防火墙、域名回源端口一致。
 - 无法登录或提示 429：核对管理员密码，等待限速窗口结束；若开启 `NODE_ENV=production`，必须用 HTTPS 登录。
 - 订阅不可用：检查用户是否被封禁/到期/超额，再检查域名、TLS、WebSocket 回源和客户端能力。

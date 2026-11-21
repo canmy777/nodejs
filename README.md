@@ -4,7 +4,7 @@
 
 | 目录 | 类型 | 说明 |
 | :--- | :--- | :--- |
-| `kata-nodejs/` | 容器类项目 | Kata-Tunnel：零依赖 VLESS-WS 隧道 + 三网优选 + 订阅转换 + Web 后台，面向 Kata/Lunes 翼龙面板容器 |
+| `kata-nodejs/` | 容器类项目 | Kata-Tunnel：零依赖 VLESS-WS 隧道、三网优选、订阅转换和 Web 后台；本地候选含探针命令与 Komari 上传/启停/可选自启，面向 Kata/Lunes 翼龙面板容器，部署另行验收 |
 | `altare-nodejs/` | 容器类项目 | Altare-Tunnel：零依赖 VLESS-WS 隧道、订阅转换和地区标题后台；本地候选含探针命令管理、Komari 文件上传与可选自动启动，线上状态另行验收。通用安装、配置及平台 API 用法见 `altare-nodejs/README.md`。个人部署档案不进入源码仓库 |
 | `vps-nodejs/` | 服务器脚本 | VPS-Tunnel / VPS 环境一键安装与隧道脚本 |
 | `linux/` | 服务器脚本 | 全 Linux 发行版机场系统安装脚本（见下方一键命令） |
