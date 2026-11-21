@@ -1,6 +1,6 @@
 {
   "name": "altare-tunnel",
-  "version": "1.1.0",
+  "version": "2.0.0-test.1",
   "description": "Ultra-lightweight VLESS-WebSocket Tunnel & Wetest 3-Carrier Engine for Altare Container (512MB RAM / 25% CPU)",
   "main": "index.js",
   "scripts": {

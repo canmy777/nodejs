@@ -85,6 +85,58 @@ test('admin user list renders existing users as text and sorts both ways', async
     }
 });
 
+test('probe panel imports commands as text, suppresses saved text and separates save from execution', async () => {
+    const elements = new Map();
+    const element = id => {
+        if (!elements.has(id)) elements.set(id, { value: '', textContent: '', style: {}, dataset: {}, disabled: false });
+        return elements.get(id);
+    };
+    const calls = [];
+    const state = { configured: true, revision: 'test-revision', timeoutSeconds: 0, savedAt: 'test-time', running: false, run: null };
+    const context = vm.createContext({
+        document: { getElementById: element }, location: { origin: 'https://example.test' }, machineTag, regionTitle, escapeHtml,
+        fetch: async (url, options) => {
+            calls.push({ url, options });
+            if (url.startsWith('/admin/api/probe/')) return { ok: true, json: async () => state };
+            return { ok: false, status: 401, json: async () => ({}) };
+        },
+        console, setInterval: () => 1, clearInterval() {}, setTimeout: () => 0
+    });
+    vm.runInContext(declaration('renderAdminDashboardPage'), context);
+    const html = vm.runInContext('renderAdminDashboardPage()', context);
+    assert.match(html, /id="menu_probe"/);
+    assert.match(html, /id="panel_probe"/);
+    assert.match(html, /id="probe_password"/);
+    for (const match of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) vm.runInContext(match[1], context);
+    vm.runInContext('showToast = () => {}; confirmAction = async () => true;', context);
+    context.fileEvent = { target: { files: [{ name: 'probe.sh', size: 20, text: async () => '<script>test-only</script>' }], value: 'test-file' } };
+    await vm.runInContext('importProbeCommand(fileEvent)', context);
+    assert.equal(element('probe_command').value, '<script>test-only</script>');
+    assert.equal(context.fileEvent.target.value, '');
+    element('probe_password').value = 'test-password';
+    element('probe_timeout').value = '0';
+    await vm.runInContext("probeAction('config')", context);
+    assert.equal(element('probe_command').value, '');
+    assert.equal(element('probe_password').value, '');
+    assert.match(element('probe_config_status').textContent, /前台常驻/);
+    assert.equal(calls.filter(x => x.url === '/admin/api/probe/run').length, 0);
+    element('probe_password').value = 'test-password';
+    await vm.runInContext("probeAction('run')", context);
+    const execution = calls.find(x => x.url === '/admin/api/probe/run');
+    assert.equal(execution.options.method, 'POST');
+    assert.equal(JSON.parse(execution.options.body).revision, 'test-revision');
+    assert.equal(element('probe_password').value, '');
+    element('probe_command').value = 'unsaved';
+    element('probe_password').value = 'test-password';
+    await vm.runInContext("probeAction('run')", context);
+    assert.equal(calls.filter(x => x.url === '/admin/api/probe/run').length, 1);
+    element('probe_command').value = '';
+    vm.runInContext("confirmAction = async () => { probeRevision = 'newer-revision'; return true; };", context);
+    await vm.runInContext("probeAction('run')", context);
+    const executions = calls.filter(x => x.url === '/admin/api/probe/run');
+    assert.equal(JSON.parse(executions.at(-1).options.body).revision, 'test-revision', 'confirmation binds the command revision before awaiting the dialog');
+});
+
 test('panel region code resolves to a localized country label', () => {
     const context = vm.createContext({});
     vm.runInContext(declaration('countryLabel'), context);

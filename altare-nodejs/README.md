@@ -16,6 +16,8 @@ altare-nodejs/
 ├── .env.example      # 配置模板（部署时复制为 .env）
 ├── src/
 │   ├── argo-supervisor.js # 隧道进程监管与就绪探测（必须）
+│   ├── probe-manager.js # 私有命令存储、受管执行与进程组清理（必须）
+│   ├── probe-routes.js  # 管理会话、来源、再次验密与探针 API（必须）
 │   ├── security.js      # 密码哈希、会话、限速（必须）
 │   ├── protocol.js      # WebSocket/VLESS 协议解析（必须）
 │   ├── sub_converter.js # 现代订阅转换引擎：6 格式 + ECH 规范（必须）
@@ -24,7 +26,7 @@ altare-nodejs/
 └── data/             # 运行时生成，保存用户与设置
 ```
 
-注意：`src/` 五个模块必须一起上传，只传 `index.js` 会报 `Cannot find module './src/security'` 或 `Cannot find module './src/sub_converter'`。
+注意：`src/` 全部模块必须一起上传，只传 `index.js` 会因为缺少依赖模块而启动失败。
 
 ## 2. 环境要求
 
@@ -110,6 +112,18 @@ npm start         # 启动
 - **封禁/解封/续期/删除**：在用户编辑框内操作。封禁和删除会断开该用户连接。
 - **重启核心**：顶部工具栏按钮，会重启 Node 服务，影响所有在线连接，请在维护时段使用。
 
+### 探针管理
+
+当前候选版本 `2.0.0-test.1` 新增后台「探针管理」，本地验证后仍需单台容器验收再推广。管理员可粘贴命令或从 `.sh/.txt` 导入（16 KiB 内），保存后单独点击「执行」，也可查看状态或停止。保存、执行和停止均要求有效管理会话、合法 HTTPS Origin 与重新输入当前管理密码；执行前有确认框，同一时刻只运行一个任务，命令版本变化会拒绝执行旧版本。
+
+- 命令保存到 `data/probe-private/command.json`，目录 0700、文件 0600，并原子替换。该文件可能含凭据，属于私有运行配置，禁止加入 Git、普通备份或发给其他人；页面与状态 API 不回显命令。
+- 执行工作目录为 `data/probe-private/`，通过 Bash（没有时用 sh）的 stdin 传入命令，不把命令放到系统进程参数。不会继承应用的 Token、密码或 `NODE_OPTIONS` 环境变量；这不是沙箱，同一容器用户仍能读取其有权限的文件并访问网络。
+- 默认最多执行 300 秒，可设 10–1800 秒；设为 0 可运行前台常驻探针，直到手动停止或应用关闭。输出超过 1 MiB 会终止。原始 stdout/stderr 直接丢弃，不写应用日志或返回浏览器；仅保留本次状态、时间、输出字节数和退出码，状态记录只在内存中。
+- 点击停止、超时、输出超限、应用正常关闭都会先终止当前进程组，必要时强制终止。保存命令及应用重启均不会自动执行。只管理自己启动的当前进程组，不按历史 PID 杀进程。
+- 适用于容器权限下的前台安装/检查任务。需要 sudo/root、systemd/OpenRC 的宿主机安装命令不能直接套用。常驻探针应设为 0 并在前台运行；设置正数时达到时限会停止。自行 daemonize/setsid 脱离的子进程不受管理器控制，不应使用此类命令。安装退出码 0 仅表示命令结束，不代表探针已向监控面板注册上线。
+
+接口：`GET /admin/api/probe/status`；`POST /admin/api/probe/config`（command/timeoutSeconds/password）；`POST /admin/api/probe/run`（revision/password）；`POST /admin/api/probe/stop`（password）。不提供通过 GET 触发执行的入口。
+
 ## 8. 订阅地址
 
 格式：`/sub?token=用户UUID`
@@ -143,7 +157,7 @@ node --check index.js
 npm test
 ```
 
-- 模块找不到：补传 `src/` 下五个模块（`security.js`、`protocol.js`、`sub_converter.js`、`yaml-lite.js`、`argo-supervisor.js`），检查大小写与目录层级。
+- 模块找不到：补传 `src/` 下全部模块，包括新增的 `probe-manager.js` 和 `probe-routes.js`，检查大小写与目录层级。
 - 页面打不开：确认业务端口、容器监听、防火墙、域名回源端口一致。
 - 无法登录或提示 429：确认使用 HTTPS，核对管理员密码并等待限速窗口结束。
 - 订阅不可用：检查用户是否被封禁/到期/超额，再检查域名、TLS、WebSocket 回源和客户端能力。
@@ -247,7 +261,7 @@ jq -n --rawfile content ./index.js '{path:"/index.js",content:$content}' |
 cmp ./index.js <(altare "$BASE/files/contents?path=%2Findex.js" | jq -j '.content')
 ```
 
-需要部署 `index.js`、`package.json`、`start.sh`、`src/` 全部五个模块。只传入口文件会因为缺模块启动失败。更新时保留线上 `.env`、`data/`、已有 `cloudflared`，不能用新实例模板或本地测试用户库覆盖线上配置及用户数据。
+需要部署 `index.js`、`package.json`、`start.sh`、`src/` 全部模块。只传入口文件会因为缺模块启动失败。更新时保留线上 `.env`、`data/`、已有 `cloudflared`，不能用新实例模板或本地测试用户库覆盖线上配置及用户数据。
 
 二进制走短时上传链接：
 
