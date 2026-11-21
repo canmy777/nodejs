@@ -1527,6 +1527,35 @@ function formatBytes(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+function readCgroupValue(paths) {
+    for (const filePath of paths) {
+        try {
+            const value = fs.readFileSync(filePath, 'utf8').trim();
+            if (value) return value;
+        } catch (_) {}
+    }
+    return null;
+}
+
+function getContainerMemory() {
+    const usedRaw = readCgroupValue([
+        '/sys/fs/cgroup/memory.current',
+        '/sys/fs/cgroup/memory/memory.usage_in_bytes'
+    ]);
+    const limitRaw = readCgroupValue([
+        '/sys/fs/cgroup/memory.max',
+        '/sys/fs/cgroup/memory/memory.limit_in_bytes'
+    ]);
+    const used = /^\d+$/.test(usedRaw || '') ? Number(usedRaw) : null;
+    let limit = /^\d+$/.test(limitRaw || '') ? Number(limitRaw) : null;
+    // cgroup v2 uses "max"; some v1 runtimes use a very large sentinel.
+    if (limitRaw === 'max' || (limit !== null && limit > 1024 ** 4)) limit = null;
+    return {
+        used: Number.isSafeInteger(used) ? used : null,
+        limit: Number.isSafeInteger(limit) ? limit : null
+    };
+}
+
 // ==========================================
 // 10. Web 服务与 API
 // ==========================================
@@ -2308,11 +2337,14 @@ async function convertSubWithZeroTrust(user, target, rawNodes, settings, localEn
         if (pathname === '/admin/api/status') {
             if (!isSameOriginRequest(req)) return sendJson({ error: '请求来源无效' }, 403);
             const mem = process.memoryUsage();
+            const containerMemory = getContainerMemory();
             let totalOnlineConns = 0;
             activeConnections.forEach(set => totalOnlineConns += set.size);
             return sendJson({
                 uptime: Math.floor(process.uptime()),
                 memoryRss: formatBytes(mem.rss),
+                containerMemoryUsed: containerMemory.used === null ? null : formatBytes(containerMemory.used),
+                containerMemoryLimit: containerMemory.limit === null ? null : formatBytes(containerMemory.limit),
             argoStatus: argoStatus,
             argoLastLog: argoLastLog,
                 memoryHeap: formatBytes(mem.heapUsed),
@@ -4720,9 +4752,9 @@ function renderAdminDashboardPage() {
                 </div>
                 <div class="kpi-card">
                     <div>
-                        <div class="kpi-label">Node.js RSS 内存</div>
-                        <div class="kpi-val" id="kpi_rss" style="color:#2563eb;">--</div>
-                        <div class="kpi-sub">当前容器内存占用</div>
+                        <div class="kpi-label">Node / 容器内存</div>
+                        <div class="kpi-val" id="kpi_rss" style="font-size:15px; color:#2563eb;">-- / -- / --</div>
+                        <div class="kpi-sub">Node RSS / 容器已用 / 容器上限</div>
                     </div>
                     <div class="kpi-icon-wrap" style="background:#eff6ff; color:#2563eb;">🧠</div>
                 </div>
@@ -5196,7 +5228,8 @@ function renderAdminDashboardPage() {
                 const data = await res.json();
                 if (res.ok) {
                     currentSettings = data.settings || {};
-                    document.getElementById('kpi_rss').innerText = data.memoryRss || '--';
+                    document.getElementById('kpi_rss').innerText =
+                        (data.memoryRss || '--') + ' / ' + (data.containerMemoryUsed || '--') + ' / ' + (data.containerMemoryLimit || '--');
                     document.getElementById('kpi_conns').innerText = data.onlineConnections || '0';
                     document.getElementById('stat_memRss').innerText = data.memoryRss;
                     document.getElementById('stat_conns').innerText = data.onlineConnections;

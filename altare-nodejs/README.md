@@ -11,6 +11,7 @@
 ```text
 altare-nodejs/
 ├── index.js          # 主程序（必须）
+├── start.sh          # cgroup 内存感知启动器：V8 堆上限按容器限额 70% 计算（必须）
 ├── package.json      # 启动与测试脚本（必须）
 ├── .env.example      # 配置模板（部署时复制为 .env）
 ├── src/
@@ -53,9 +54,9 @@ npm start         # 启动
 
 1. 新建服务器，选择 Node.js 运行环境，记下面板分配的业务端口（SFTP 端口与业务端口不同）。
 2. 用面板 Settings 里给出的 SFTP 主机、端口、用户名、密码连接。SFTP 根目录通常对应 `/home/container`。
-3. 上传这些文件到容器根目录：`index.js`、`package.json`、整个 `src/` 目录。首次部署把 `.env.example` 复制为 `.env` 并填写配置。不要上传整个父目录，也不要上传 `test/`。
+3. 上传这些文件到容器根目录：`index.js`、`package.json`、`start.sh`、整个 `src/` 目录。首次部署把 `.env.example` 复制为 `.env` 并填写配置。不要上传整个父目录，也不要上传 `test/`。
 4. 端口：面板注入 `SERVER_PORT` 时，`.env` 里的 `SERVER_PORT`、`PORT` 留空即可；程序会自动探测面板端口（进程环境变量 → `/proc` → 命令行 → 模糊匹配）。手动部署才需要显式填写。不再有固定默认端口，探测不到端口时服务挂起等待。
-5. 启动命令填写：`node --max-old-space-size=<按目标实例内存配额设置> /home/container/index.js`（或在项目根目录用 `npm start`）。
+5. 上传 `start.sh` 并设置执行权限；启动命令填写：`cd /home/container && umask 077 && exec /bin/sh /home/container/start.sh >> /home/container/boot.log 2>&1`。脚本读取 cgroup v1/v2 容器内存上限，以 70% 设置 V8 old-space，不在面板命令中固定堆值；无法读取有效限制时交由 Node.js 使用默认堆策略。
 6. 点击启动，查看控制台是否出现核心启动标记，然后打开首页与 `/admin`。观察约两分钟确认稳定，不要只看面板 Running。
 7. 公网建议通过自己的 HTTPS 反代或 Cloudflare Tunnel 访问。
 
@@ -128,7 +129,7 @@ npm start         # 启动
 
 ## 9. 更新与备份
 
-1. 更新前备份线上 `index.js`、`package.json`、`src/`，以及私下的 `.env`、`data/`。
+1. 更新前备份线上 `index.js`、`package.json`、`start.sh`、`src/`，以及私下的 `.env`、`data/`。
 2. **升级时保留现有 `.env` 和 `data/`，不要用示例覆盖。**
 3. 上传新版本源码文件，校验，重启，查看控制台和页面。
 4. 失败时恢复旧文件并重启；恢复用户数据请选对备份版本。
@@ -160,6 +161,7 @@ npm test
 
 - 优先读取 Altare 注入的 `P_SERVER_LOCATION`。缺少机房地区时，按公网 IPv4 查询 ipinfo.io，失败时显示「未知地区」。
 - 首页、管理登录页、后台顶部和浏览器标题显示国家／地区及机房城市，不显示端口或版本数字。
+- 后台顶部内存卡分别显示 Node.js RSS、cgroup 容器已用内存、容器内存上限；未提供 cgroup 数据时显示 `--`，不会把 Node RSS 误当成容器总用量。
 - 订阅节点名仍保留端口作为机器标识，便于区分同一地区的多个实例。
 
 ### 隧道启动、停止与自愈
@@ -245,7 +247,7 @@ jq -n --rawfile content ./index.js '{path:"/index.js",content:$content}' |
 cmp ./index.js <(altare "$BASE/files/contents?path=%2Findex.js" | jq -j '.content')
 ```
 
-需要部署 `index.js`、`package.json`、`src/` 全部五个模块。只传入口文件会因为缺模块启动失败。更新时保留线上 `.env`、`data/`、已有 `cloudflared`，不能用新实例模板或本地测试用户库覆盖线上配置及用户数据。
+需要部署 `index.js`、`package.json`、`start.sh`、`src/` 全部五个模块。只传入口文件会因为缺模块启动失败。更新时保留线上 `.env`、`data/`、已有 `cloudflared`，不能用新实例模板或本地测试用户库覆盖线上配置及用户数据。
 
 二进制走短时上传链接：
 
@@ -395,4 +397,3 @@ archive 限每分钟 10 次，pull 限每分钟 20 次；不要把 JSON 文本�
 处理响应时先检查 HTTP 状态和 Content-Type，再解析 JSON。写请求超时后的步骤是回读对账；若文件或电源状态无法核实，保持“未确认”，不要报部署成功。
 
 参考：官方 API 的 [Apps](https://docs.altare.gg/altare-api/apps)、[Files](https://docs.altare.gg/altare-api/files)、[Tokens](https://docs.altare.gg/altare-api/tokens)、[Domains](https://docs.altare.gg/altare-api/domains)、[Logs](https://docs.altare.gg/altare-api/logs)、[Errors](https://docs.altare.gg/altare-api/errors)、[Deploys](https://docs.altare.gg/altare-api/deploys)。
-
